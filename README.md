@@ -6,7 +6,6 @@ Scripts for processing VASP DFT data and training a Message Passing Neural Netwo
 ## Files
 
 * **build_dataset_duplicate.py**: The main pipeline script. Parses OUTCAR/vasprun.xml files, handles the train/test split, and outputs a master summary CSV. Use the `--duplicate on` flag to automatically supercell small geometries so they don't violate the minimum image convention based on the cutoff in the ffield file.
-* **build_dataset.py**: The old version of the script. It doesn't handle supercell duplication or tracking crashed runs. Ignore this one.
 * **train_without_force_Li_NN.py**: The actual neural network training script. Optimises the ReaxFF/MPNN energy, bond-order, and many-body parameters.
 * **ffield.json**: The starting force field parameter file. Generated from previous I-ReaxFF run and 2024vD data.
 
