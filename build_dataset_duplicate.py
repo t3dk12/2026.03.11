@@ -384,13 +384,13 @@ def main():
     parser.add_argument("--csv_name", type=str, default="dft_summary.csv", help="Name of summary CSV file.")
     parser.add_argument("--split_ratio", type=float, default=0.10, help="Fraction of data for test set.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting.")
-    parser.add_argument("--duplicate", type=str, choices=["on","off"], default="off", help="Enable enlargement of small boxes ('on' or 'off').")
+    parser.add_argument("--duplicate", type=int, choices=["1","0"], default="0", help="Enable enlargement of small boxes (1=on, 0=off).")
     parser.add_argument("--ffield", type=Path, default=Path("ffield.json"), help="Path to ffield.json to read rcut.")
     parser.add_argument("--cutoff", type=float, default=4.0, help="Fallback cutoff if ffield.json missing or unreadable.")
     args = parser.parse_args()
 
     actual_cutoff = get_cutoff_radius(args.ffield, args.cutoff)
-    enlarge = args.duplicate.lower() == "on"
+    enlarge = args.duplicate == 1
 
     csv_path = args.output_dir / args.csv_name
 
