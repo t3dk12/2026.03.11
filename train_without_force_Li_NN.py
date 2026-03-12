@@ -104,26 +104,56 @@ if not args.bo:
         'bo1', 'bo2', 'bo3', 'bo4', 'bo5', 'bo6'
     ]
 
-# Initialise MPNN model for energy-only optimisation
-rn = MPNN(libfile=args.ffield,
-          dataset=dataset,
-          batch_size=args.batch,
-          losFunc='n2',          # L2 norm (MSE) for the loss function
-          vdwcut=10.0,           # Global cutoff for van der Waals interactions (Angstroms)
-          cons=cons,             # List of frozen parameters
-          # ReaxFF-nn specific arguments
-          mf_layer=[9, 1],       # Neural network architecture for Message Passing / Bond Order (Input: 9 features -> Output: 1)
-          be_layer=[9, 1],       # Neural network architecture for Bond Energy calculations
-          EnergyFunction=1,      # Turns on NN formulation for energy calculations
-          MessageFunction=3,     # Turns on NN formulation for bond-orders (message passing style)
-          messages=1             # Number of message passing iterations (hops) between atoms
-         )
+if __name__ == '__main__':
+    # Bullet-proof fix for the __spec__ crash in IPython/interactive environments
+    import __main__
+    if not hasattr(__main__, '__spec__'):
+        __main__.__spec__ = None
 
-# Execution / Training Loop
-print(f"Starting MPNN training for {args.step} iterations with learning rate {args.lr}...")
-rn.run(learning_rate=args.lr, 
-       step=args.step, 
-       print_step=args.pr, 
-       writelib=args.writelib)
+    # Initialise MPNN model for energy-only optimisation
+    rn = MPNN(libfile=args.ffield, 
+              dataset=dataset, 
+              batch_size=args.batch, 
+              losFunc='n2',          
+              vdwcut=10.0,            
+              cons=cons,             
+              mf_layer=[9, 1],       
+              be_layer=[9, 1],       
+              EnergyFunction=1,     
+              MessageFunction=3,     
+              messages=1,
+              energy_term={'ecoul': False}  
+             )
 
-print("Training complete. Force field saved.")
+    # Execution / Training Loop
+    print(f"Starting MPNN training for {args.step} iterations with learning rate {args.lr}...") 
+    rn.run(learning_rate=args.lr, 
+           step=args.step, 
+           print_step=args.pr, 
+           writelib=args.writelib)
+
+    print("Training complete. Force field saved.")
+
+# # Initialise MPNN model for energy-only optimisation
+# rn = MPNN(libfile=args.ffield,
+#           dataset=dataset,
+#           batch_size=args.batch,
+#           losFunc='n2',          # L2 norm (MSE) for the loss function
+#           vdwcut=10.0,           # Global cutoff for van der Waals interactions (Angstroms)
+#           cons=cons,             # List of frozen parameters
+#           # ReaxFF-nn specific arguments
+#           mf_layer=[9, 1],       # Neural network architecture for Message Passing / Bond Order (Input: 9 features -> Output: 1)
+#           be_layer=[9, 1],       # Neural network architecture for Bond Energy calculations
+#           EnergyFunction=1,      # Turns on NN formulation for energy calculations
+#           MessageFunction=3,     # Turns on NN formulation for bond-orders (message passing style)
+#           messages=1             # Number of message passing iterations (hops) between atoms
+#          )
+
+# # Execution / Training Loop
+# print(f"Starting MPNN training for {args.step} iterations with learning rate {args.lr}...")
+# rn.run(learning_rate=args.lr, 
+#        step=args.step, 
+#        print_step=args.pr, 
+#        writelib=args.writelib)
+
+# print("Training complete. Force field saved.")
