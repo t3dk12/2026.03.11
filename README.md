@@ -56,6 +56,6 @@ python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=10 --writelib=100
 * `--seed`: Random seed for reproducible train/test splitting. Default is `42`.
 
 ### Supercell Duplication (Minimum Image Convention):
-* `--duplicate`: Set to `on` to enable automatic supercell duplication for undersized geometries. Set to `off` to extract as-is. Default is `off`.
+* `--duplicate`: Set to '1' to enable automatic supercell duplication for undersized geometries. Set to `0` to extract as-is. Default is `0`.
 * `--ffield`: Path to your force field parameter file to dynamically extract the `rcut` value. Default is `ffield.json`.
 * `--cutoff`: Fallback cutoff radius (in Å) to use if `ffield.json` is missing or unreadable. Default is `4.0`. 
