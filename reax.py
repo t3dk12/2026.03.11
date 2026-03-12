@@ -23,32 +23,18 @@ import json as js
 # tf.compat.v1.disable_v2_behavior()
 tf.compat.v1.disable_eager_execution()
 
-# TK 2026.03.12: added multiprocessing to speed up input
 import multiprocessing as mp
 
-# TK 2026.03.12: Parallel processing for trajectory loading
 def _parallel_reax_data(args):
-    """Helper function to load trajectories in parallel"""
-    (mol, direc, atoms, vdwcut, rcut, rcuta, hbshort, hblong,
+    """Top-level helper to bypass the GIL and load trajectories in parallel."""
+    (mol, direc, atoms, vdwcut, rcut, rcuta, hbshort, hblong, 
      batch, sample, p_, spec, bonds, angs, tors, nindex) = args
-    data_ = reax_data(
-        structure=mol, # Trajectory file name (e.g., 'Li2O-1.traj')
-        direc=direc, # Directory containing the trajectory files (e.g., 'traj/train')
-        atoms=atoms, # List of atomic species to consider (e.g., ['Li', 'O'])
-        vdwcut=vdwcut, # Cutoff distance for van der Waals interactions (e.g., 10.0 Angstroms)
-        rcut=rcut, # Cutoff distance for bond interactions (e.g., 4.0 Angstroms)
-        rcuta=rcuta, # Cutoff distance for angle interactions (e.g., 3.0 Angstroms)
-        hbshort=hbshort, # Cutoff distance for short hydrogen bonds (e.g., 2.0 Angstroms)
-        hblong=hblong, # Cutoff distance for long hydrogen bonds (e.g., 3.0 Angstroms)
-        batch=batch, # Number of configurations to process in each batch (e.g., 50)
-        sample=sample, # Sampling method for selecting configurations (e.g., 'uniform' or 'random')
-        p=p_, # Parameters for the ReaxFF force field
-        spec=spec, # List of atomic species in the system (e.g., ['Li', 'O'])
-        bonds=bonds, # List of bond types to consider (e.g., ['Li-Li', 'Li-O', 'O-O'])
-        angs=angs, # List of angle types to consider (e.g., ['Li-Li-Li', 'Li-Li-O', 'Li-O-Li', 'O-Li-O'])
-        tors=tors, # List of torsion types to consider (e.g., ['Li-Li-Li-Li', 'Li-Li-Li-O', 'Li-Li-O-Li', 'Li-O-Li-Li', 'O-Li-Li-Li'])
-        nindex=nindex # List of indices for selecting specific configurations from the trajectory (e.g., [0, 10, 20, ...])
-    )
+     
+    data_ = reax_data(structure=mol, direc=direc, atoms=atoms, 
+                      vdwcut=vdwcut, rcut=rcut, rcuta=rcuta, 
+                      hbshort=hbshort, hblong=hblong, batch=batch, 
+                      sample=sample, p=p_, spec=spec, bonds=bonds, 
+                      angs=angs, tors=tors, nindex=nindex)
     return mol, data_
 
 class Chromosome:
@@ -296,67 +282,39 @@ class ReaxFF(object):
       # self.nbe0   = {}
       self.mols   = []
       self.eself,self.evdw_,self.ecoul_ = {},{},{}
-    
-      # TK 2026.03.12: 
-      # number of cores
-      ncores = max(1, mp.cpu_count() // 2)
 
-      # prepare arguments
-      # 1. Generate a list of tuples containing the arguments for each trajectory file
-      task_args = [] # list of tuples: (mol, traj_path, atoms, vdwcut, rcut, rcuta, hbshort, hblong, batch, sample, p_, spec, bonds, angs, tors, nindex)
+
+      task_arguments = []
       for mol in self.dataset:
          nindex = []
          for key in molecules:
-            if self.dataset[key] == self.dataset[mol]:
+            if self.dataset[key]==self.dataset[mol]:
                nindex.extend(molecules[key].indexs)
-          #   
-          task_args.append(
-            (
-              mol,                    # molecule identifier
-              self.dataset[mol],      # trajectory file path
-              self.atoms,             # atom definitions
-              self.vdwcut,            # van der Waals cutoff
-              self.rcut,              # bond cutoff
-              self.rcuta,             # angular cutoff
-              self.hbshort,           # short hydrogen bond cutoff
-              self.hblong,            # long hydrogen bond cutoff
-              self.batch,             # number of frames per batch
-              self.sample,            # sampling frequency
-              self.p_,                # additional parameters
-              self.spec,              # species definitions
-              self.bonds,             # bond definitions
-              self.angs,              # angle definitions
-              self.tors,              # torsion definitions
-              nindex                  # atom indices associated with this dataset
-            )
-         )
+                    
+         task_args = (mol, self.dataset[mol], self.atoms, self.vdwcut, 
+                      self.rcut, self.rcuta, self.hbshort, self.hblong, 
+                      self.batch, self.sample, self.p_, self.spec, 
+                      self.bonds, self.angs, self.tors, nindex
+                      )
+         task_arguments.append(task_args)
+         
+      ncores = mp.cpu_count()
+      print(f"- launching multiprocessing pool on {ncores} cores...")
+      with mp.Pool(processes=ncores) as pool:
+         results = pool.map(_parallel_reax_data, task_arguments)
 
-      # parallel execution using multiprocessing Pool
-      with mp.Pool(processes=int(ncores)) as pool:
-         results = pool.map(_parallel_reax_data, task_args)
-
-      # collect results
-      # Each result contains:
-      # (mol, data_)
-      # where:
-      # mol   = molecule identifier
-      # data_ = processed trajectory data object
       for mol, data_ in results:
          if data_.status:
             self.mols.append(mol)
-            molecules[mol]  = data_
-            self.nframe    += self.batch
-            print(f'-  max energy of {mol}: {molecules[mol].max_e}.')
+            molecules[mol] = data_
+            self.nframe += self.batch
+            print('- max energy of %s: %f.' %(mol, molecules[mol].max_e))
             self.max_e[mol] = molecules[mol].max_e
+            self.ecoul_[mol] = molecules[mol].ecoul
+            self.eself[mol] = molecules[mol].eself
+         else:
+            print('- data status of %s:' %mol, data_.status)
 
-            # self.evdw_[mol]= molecules[mol].evdw
-            self.ecoul_[mol] = molecules[mol].ecoul  
-            
-            self.eself[mol] = molecules[mol].eself    
-            # self.nbe0[mol]= molecules[mol].nbe0   
-            # self.cell[mol]  = molecules[mol].cell
-            # self.bf[mol]    = tf.constant(molecules[mol].bf,dtype=tf.float32)
-    
       # for mol in self.dataset: 
       #     nindex = []
       #     for key in molecules:
