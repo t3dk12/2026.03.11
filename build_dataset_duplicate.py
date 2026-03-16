@@ -12,6 +12,9 @@ import random
 import re
 import shutil
 import sys
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 import numpy as np
 from pathlib import Path
 from ase.io import read, write
@@ -54,32 +57,131 @@ def get_cutoff_radius(ffield_path: Path, fallback_cutoff: float) -> float:
     return fallback_cutoff
 
 
-# Read and process VASP output files and optionally enlarge small simulation boxes
+# --- NEW MULTIPROCESSING HELPER FUNCTION ---
+# This function handles exactly one folder. We separated this from the main loop
+# so that multiple CPU cores can run this function at the exact same time.
+def process_single_folder(folder: Path, input_dir: Path, output_dir: Path, unused_folder: Path, minimum_box_width: float, enlarge_small_boxes: bool):
+    outcar_file = folder / "OUTCAR"
+    relative_path = folder.relative_to(input_dir)
+
+    # remove slashes and join with underscores
+    base_filename = "_".join(relative_path.parts)
+    final_file_path = output_dir / f"{base_filename}.traj"
+
+    # Start tracker entry for this specific folder
+    status_info = {
+        "Status": "Valid",
+        "Duplicated": "N",
+        "Notes": "Original file is valid."
+    }
+
+    # Skip files that were already processed 
+    existing_supercells = list(output_dir.glob(f"{base_filename}_supercell_*.traj"))
+    if final_file_path.exists() or existing_supercells:
+        return base_filename, status_info
+
+    trajectory_frames = None
+    error_message = ""
+
+    # Read OUTCAR
+    if outcar_file.exists():
+        try:
+            trajectory_frames = read(outcar_file, index=":")
+        except Exception as e:
+            error_message = str(e)
+
+    # If reading fails, copy original file to unused_data and mark as failed
+    if not trajectory_frames:
+        failed_filename = f"{base_filename}_OUTCAR"
+        status_info = {
+            "Status": "Failed",
+            "Duplicated": "N",
+            "Notes": f"Could not read OUTCAR file: {error_message}",
+            "Failed_File": failed_filename
+        }
+        shutil.copy(outcar_file, unused_folder / failed_filename)
+        print(f"Failed to read {base_filename} -> copied original to unused_data as {failed_filename}")
+        return base_filename, status_info
+
+    # If enlargement is enabled, calculate box widths and compare to required minimum width
+    if enlarge_small_boxes:
+        last_frame = trajectory_frames[-1]
+        cell = last_frame.get_cell()
+        volume = cell.volume
+
+        # Calculate widths in each direction
+        cell_widths = [
+            volume / np.linalg.norm(np.cross(cell[1], cell[2])),
+            volume / np.linalg.norm(np.cross(cell[2], cell[0])),
+            volume / np.linalg.norm(np.cross(cell[0], cell[1])),
+        ]
+        repetitions_needed = [int(np.ceil(minimum_box_width / width)) for width in cell_widths]
+
+        # Duplicate frames if any direction is too small
+        if any(r > 1 for r in repetitions_needed):
+            rep_x, rep_y, rep_z = repetitions_needed
+            total_cells = rep_x * rep_y * rep_z
+            supercell_tag = f"_supercell_{rep_x}x{rep_y}x{rep_z}"
+            final_file_path = output_dir / f"{base_filename}{supercell_tag}.traj"
+
+            # Save original small file to unused_data
+            original_file_path = unused_folder / f"{base_filename}_original.traj"
+            write(original_file_path, trajectory_frames)
+
+            new_trajectory_frames = []
+
+            for frame in trajectory_frames:
+                # Repeat atoms to create supercell
+                supercell_atoms = frame.repeat((rep_x, rep_y, rep_z))
+
+                # store original properties
+                original_energy = frame.get_potential_energy() if frame.calc else None
+                original_forces = frame.get_forces() if frame.calc else None
+                original_stress = frame.get_stress() if frame.calc else None
+
+                # calculate new properties for the supercell
+                new_energy = original_energy * total_cells if original_energy else None
+                new_forces = np.tile(original_forces, (total_cells, 1)) if original_forces is not None else None
+                new_stress = original_stress
+
+                sp_calc = SinglePointCalculator(
+                    supercell_atoms, energy=new_energy, forces=new_forces, stress=new_stress
+                )
+                supercell_atoms.calc = sp_calc
+                new_trajectory_frames.append(supercell_atoms)
+
+            # Save supercell trajectory
+            write(final_file_path, new_trajectory_frames)
+            status_info["Duplicated"] = "Y"
+            status_info["Notes"] = (
+                f"Original box too small, multiplied by [{rep_x}x{rep_y}x{rep_z}], "
+                f"original moved to unused_data"
+            )
+            print(f"Enlarged {base_filename} to {final_file_path.name}")
+            return base_filename, status_info
+    else:
+        status_info["Notes"] += " (enlargement turned off)"
+
+    # Save normally if enlargement is off or box is large enough
+    write(final_file_path, trajectory_frames)
+    
+    return base_filename, status_info
+
+
+# Read and process VASP output files across multiple CPU cores
 # Steps:
 # 1. Print starting message
 # 2. Make folders for output and unused data
 # 3. Find all directories containing OUTCAR files
 # 4. Initialise tracker dictionary to record status, duplication, and notes
-# 5. Loop over each calculation directory:
-#      5a. Set paths and base filename
-#      5b. Start tracker entry
-#      5c. Skip files that were already processed
-#      5d. Read OUTCAR
-#      5e. If reading fails, copy original file to unused_data and mark as failed
-#      5f. If enlargement is enabled, calculate box widths and compare to required minimum width
-#          i. Calculate widths in each direction
-#          ii. Duplicate frames if any direction is too small
-#          iii. Repeat atoms to create supercell
-#          iv. Save supercell trajectory
-#      5g. Save normally if enlargement is off or box is large enough
+# 5. Set up parallel processing (multiprocessing) to process folders simultaneously
 # 6. Return tracker dictionary
-
-def extract_and_process(input_dir: Path, output_dir: Path, cutoff_radius: float, enlarge_small_boxes: bool):
+def extract_and_process(input_dir: Path, output_dir: Path, cutoff_radius: float, enlarge_small_boxes: bool, max_workers: int):
     # 1. Print starting message
     if enlarge_small_boxes:
-        print(f"--- Phase 1: Reading files and checking box size (cutoff {cutoff_radius} Å) ---")
+        print(f"--- Phase 1: Reading files and checking box size (cutoff {cutoff_radius} Å) using {max_workers} cores ---")
     else:
-        print("--- Phase 1: Reading files (enlargement turned off) ---")
+        print(f"--- Phase 1: Reading files (enlargement turned off) using {max_workers} cores ---")
 
     # 2. Make folders for output and unused data
     output_dir.mkdir(exist_ok=True)
@@ -96,112 +198,29 @@ def extract_and_process(input_dir: Path, output_dir: Path, cutoff_radius: float,
     file_status_info = {}
     minimum_box_width = 2.0 * cutoff_radius  # minimum width required for safe periodic boundaries
 
-    # 5. Loop over each calculation directory:
-    for folder in calculation_folders:
-        # 5a. Set paths and base filename
-        outcar_file = folder / "OUTCAR"
-        relative_path = folder.relative_to(input_dir)
+    # 5. Set up parallel processing (multiprocessing)
+    # We use functools.partial to freeze the static arguments so we only have to pass the folder to the worker
+    worker_function = partial(
+        process_single_folder,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        unused_folder=unused_folder,
+        minimum_box_width=minimum_box_width,
+        enlarge_small_boxes=enlarge_small_boxes
+    )
 
-        # remove slashes and join with underscores
-        base_filename = "_".join(relative_path.parts)
-        final_file_path = output_dir / f"{base_filename}.traj"
-
-        # 5b. Start tracker entry
-        file_status_info[base_filename] = {
-            "Status": "Valid",
-            "Duplicated": "N",
-            "Notes": "Original file is valid."
-        }
-
-        # 5c. Skip files that were already processed 
-        existing_supercells = list(output_dir.glob(f"{base_filename}_supercell_*.traj"))
-        if final_file_path.exists() or existing_supercells:
-            continue
-
-        trajectory_frames = None
-        error_message = ""
-
-        # 5d. Read OUTCAR
-        if outcar_file.exists():
+    # Dispatch tasks to the CPU pool
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all folders to the executor
+        futures = [executor.submit(worker_function, folder) for folder in calculation_folders]
+        
+        # As each worker finishes its folder, collect the results
+        for future in as_completed(futures):
             try:
-                trajectory_frames = read(outcar_file, index=":")
+                base_filename, status_info = future.result()
+                file_status_info[base_filename] = status_info
             except Exception as e:
-                error_message = str(e)
-
-        # 5e. If reading fails, copy original file to unused_data and mark as failed
-        if not trajectory_frames:
-            failed_filename = f"{base_filename}_OUTCAR"
-            file_status_info[base_filename] = {
-                "Status": "Failed",
-                "Duplicated": "N",
-                "Notes": f"Could not read OUTCAR file: {error_message}",
-                "Failed_File": failed_filename
-            }
-            shutil.copy(outcar_file, unused_folder / failed_filename)
-            print(f"Failed to read {base_filename} -> copied original to unused_data as {failed_filename}")
-            continue
-
-        # 5f. If enlargement is enabled, calculate box widths and compare to required minimum width
-        if enlarge_small_boxes:
-            last_frame = trajectory_frames[-1]
-            cell = last_frame.get_cell()
-            volume = cell.volume
-
-            # 5f-i. Calculate widths in each direction
-            cell_widths = [
-                volume / np.linalg.norm(np.cross(cell[1], cell[2])),
-                volume / np.linalg.norm(np.cross(cell[2], cell[0])),
-                volume / np.linalg.norm(np.cross(cell[0], cell[1])),
-            ]
-            repetitions_needed = [int(np.ceil(minimum_box_width / width)) for width in cell_widths]
-
-            # 5f-ii. Duplicate frames if any direction is too small
-            if any(r > 1 for r in repetitions_needed):
-                rep_x, rep_y, rep_z = repetitions_needed
-                total_cells = rep_x * rep_y * rep_z
-                supercell_tag = f"_supercell_{rep_x}x{rep_y}x{rep_z}"
-                final_file_path = output_dir / f"{base_filename}{supercell_tag}.traj"
-
-                # Save original small file to unused_data
-                original_file_path = unused_folder / f"{base_filename}_original.traj"
-                write(original_file_path, trajectory_frames)
-
-                new_trajectory_frames = []
-
-                for frame in trajectory_frames:
-                    # 5f-iii. Repeat atoms to create supercell
-                    supercell_atoms = frame.repeat((rep_x, rep_y, rep_z))
-
-                    # store original properties
-                    original_energy = frame.get_potential_energy() if frame.calc else None
-                    original_forces = frame.get_forces() if frame.calc else None
-                    original_stress = frame.get_stress() if frame.calc else None
-
-                    # calculate new properties for the supercell
-                    new_energy = original_energy * total_cells if original_energy else None
-                    new_forces = np.tile(original_forces, (total_cells, 1)) if original_forces is not None else None
-                    new_stress = original_stress
-
-                    sp_calc = SinglePointCalculator(
-                        supercell_atoms, energy=new_energy, forces=new_forces, stress=new_stress
-                    )
-                    supercell_atoms.calc = sp_calc
-                    new_trajectory_frames.append(supercell_atoms)
-
-                # 5f-iv. Save supercell trajectory
-                write(final_file_path, new_trajectory_frames)
-                file_status_info[base_filename]["Duplicated"] = "Y"
-                file_status_info[base_filename]["Notes"] = (
-                    f"Original box too small, multiplied by [{rep_x}x{rep_y}x{rep_z}], "
-                    f"original moved to unused_data"
-                )
-                print(f"Enlarged {base_filename} to {final_file_path.name}")
-                continue
-        else:
-            file_status_info[base_filename]["Notes"] += " (enlargement turned off)"
-
-        # 5g. Save normally if enlargement is off or box is large enough
-        write(final_file_path, trajectory_frames)
+                print(f"A critical error occurred in a worker process: {e}")
 
     # 6. Return tracker dictionary
     return file_status_info
@@ -263,14 +282,14 @@ def split_dataset(output_dir: Path, split_ratio: float, seed: int, file_status_i
 # 3. Define CSV header
 # 4. Open CSV file for writing
 # 5. Loop over folders and trajectory files
-#      5a. Prepare base filename and tracker info
-#      5b. Try reading trajectory
-#      5c. Extract last frame properties
-#      5d. Determine lattice type, defects, surface, deformation, strain
-#      5e. Extract chemical formula, species, number of atoms, volume
-#      5f. Extract energy per atom, total energy
-#      5g. Extract forces: max force
-#      5h. Write row to CSV
+#     5a. Prepare base filename and tracker info
+#     5b. Try reading trajectory
+#     5c. Extract last frame properties
+#     5d. Determine lattice type, defects, surface, deformation, strain
+#     5e. Extract chemical formula, species, number of atoms, volume
+#     5f. Extract energy per atom, total energy
+#     5g. Extract forces: max force
+#     5h. Write row to CSV
 # 6. Add rows for completely failed files
 # 7. Print completion message
 def generate_summary_csv(output_dir: Path, csv_path: Path, file_status_info: dict):
@@ -384,9 +403,13 @@ def main():
     parser.add_argument("--csv_name", type=str, default="dft_summary.csv", help="Name of summary CSV file.")
     parser.add_argument("--split_ratio", type=float, default=0.10, help="Fraction of data for test set.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting.")
-    parser.add_argument("--duplicate", type=int, choices=["1","0"], default="0", help="Enable enlargement of small boxes (1=on, 0=off).")
+    parser.add_argument("--duplicate", type=int, choices=[1, 0], default=0, help="Enable enlargement of small boxes (1=on, 0=off).")
     parser.add_argument("--ffield", type=Path, default=Path("ffield.json"), help="Path to ffield.json to read rcut.")
     parser.add_argument("--cutoff", type=float, default=4.0, help="Fallback cutoff if ffield.json missing or unreadable.")
+    
+    # New Multiprocessing Argument
+    parser.add_argument("--workers", type=int, default=multiprocessing.cpu_count(), help="Number of CPU cores to use for reading data (defaults to all cores).")
+    
     args = parser.parse_args()
 
     actual_cutoff = get_cutoff_radius(args.ffield, args.cutoff)
@@ -394,7 +417,7 @@ def main():
 
     csv_path = args.output_dir / args.csv_name
 
-    file_status_info = extract_and_process(args.input_dir, args.output_dir, actual_cutoff, enlarge)
+    file_status_info = extract_and_process(args.input_dir, args.output_dir, actual_cutoff, enlarge, args.workers)
     split_dataset(args.output_dir, args.split_ratio, args.seed, file_status_info)
     generate_summary_csv(args.output_dir, csv_path, file_status_info)
 
