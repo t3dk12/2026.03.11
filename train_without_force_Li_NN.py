@@ -122,9 +122,8 @@ if __name__ == '__main__':
               EnergyFunction=1,     
               MessageFunction=3,     
               messages=1,
-              energy_term={'ecoul': False}  
-             )
-
+              energy_term={'ecoul': False, 'eunder': False, 'eover' : False} # ADD 'eunder': False TO BYPASS THE NaN CRASH and eover as a contigency
+              )
     # Execution / Training Loop
     print(f"Starting MPNN training for {args.step} iterations with learning rate {args.lr}...") 
     rn.run(learning_rate=args.lr, 
@@ -155,5 +154,5 @@ if __name__ == '__main__':
 #        step=args.step, 
 #        print_step=args.pr, 
 #        writelib=args.writelib)
-
 # print("Training complete. Force field saved.")
+
