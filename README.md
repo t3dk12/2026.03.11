@@ -22,7 +22,7 @@ Any crashed VASP runs or original undersized cells get dumped into the traj/unus
 Once the data is ready, run the training script. Use the following command-line toggles to configure the training loop and freeze/optimise specific classical physics terms:
 
 ```bash
-python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=10 --writelib=1000 --batch=5 --bo 0 --h 0 --a 0 --t 0 --f 0 --vdw 1
+python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=200 --writelib=1000 --batch=5 --bo 0 --h 0 --a 0 --t 0 --f 0 --vdw 1
 ```
 
 # Training Toggles (`train_without_force_Li_NN.py`)
@@ -59,3 +59,13 @@ python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=10 --writelib=100
 * `--duplicate`: Set to `1` to enable automatic supercell duplication for undersized geometries. Set to `0` to extract as-is. Default is `0`.
 * `--ffield`: Path to your force field parameter file to dynamically extract the `rcut` value. Default is `ffield.json`.
 * `--cutoff`: Fallback cutoff radius (in Å) to use if `ffield.json` is missing or unreadable. Default is `4.0`. 
+
+## HPC Setup and Installation
+
+### Required Python Packages
+* `pip install "tensorflow[and-cuda]" --user`
+* `pip install numpy ase matplotlib pandas argh cython --user`
+
+### I-ReaxFF
+* `git clone https://github.com/fenggo/I-ReaxFF.git`
+* change to irff directory `cd I-ReaxFF/irff` and replace the irff reax.py with the multiprocessing patch from https://github.com/t3dk12/2026.03.11
