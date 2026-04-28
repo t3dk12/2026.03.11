@@ -22,7 +22,7 @@ Any crashed VASP runs or original undersized cells get dumped into the traj/unus
 Once the data is ready, run the training script. Use the following command-line toggles to configure the training loop and freeze/optimise specific classical physics terms:
 
 ```bash
-python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=200 --writelib=1000 --batch=5 --bo 0 --h 0 --a 0 --t 0 --f 0 --vdw 1
+python train_without_force_Li_NN.py --s=10000 --lr=0.0001 --pr=200 --writelib=1000 --batch=50 --bo 0 --h 0 --a 0 --t 0 --f 0 --vdw 1
 ```
 
 # Training Toggles (`train_without_force_Li_NN.py`)
